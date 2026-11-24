@@ -19,8 +19,8 @@
     <span class="title">LogicSim</span>
     <button id="undo" title="Undo">↶</button>
     <span class="sep"></span>
-    <button id="play" title="Pause / run">⏸</button>
-    <button id="step" title="Step one tick">⏭</button>
+    <button id="play" title="Pause / run">Pause</button>
+    <button id="step" title="Step one tick">Step</button>
     <select id="speed" title="Simulation speed">
       <option value="5">5 ticks/s</option>
       <option value="60">60 ticks/s</option>
@@ -30,13 +30,13 @@
     </select>
     <span id="status"></span>
     <span class="grow"></span>
-    <button id="fit" title="Fit circuit to screen">⤢</button>
+    <button id="fit" title="Fit circuit to screen">⤢ Fit</button>
     <button id="export">Export</button>
     <button id="import">Import</button>
     <button id="clear">New</button>
     <input id="file" type="file" accept=".json,application/json" hidden />
   </header>
-  <canvas id="canvas"></canvas>
+  <div id="stage"><canvas id="canvas"></canvas></div>
   <div id="popup" hidden></div>
   <div id="menu" hidden></div>
   <nav id="tray"></nav>

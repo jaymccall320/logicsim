@@ -12,6 +12,9 @@ const canvas = $<HTMLCanvasElement>('canvas');
 const ctx = canvas.getContext('2d')!;
 const popup = $<HTMLDivElement>('popup'), menu = $<HTMLDivElement>('menu');
 const GRID = 10;
+const coarse = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
+const stage = $<HTMLDivElement>('stage');
+let cssW = 0, cssH = 0;
 
 // ---------------- state ----------------
 let circuit: Circuit = { version: 1, components: [], wires: [] };
@@ -49,9 +52,9 @@ async function init() {
   const params = new URLSearchParams(location.search);
   let saved: { circuit: Circuit; cam: typeof cam } | undefined;
   if (!params.has('sample')) { try { saved = await load('autosave'); } catch (e) { console.warn(e); } }
-  if (saved?.circuit?.components) { circuit = saved.circuit; Object.assign(cam, saved.cam); rebuild(); }
-  else { circuit = sampleCircuit(); rebuild(); fit(); }
-  resize();
+  circuit = saved?.circuit?.components ? saved.circuit : sampleCircuit();
+  rebuild();
+  resize(); fit();
   requestAnimationFrame(frame);
 }
 function exportFile() {
@@ -74,7 +77,7 @@ $('file').addEventListener('change', async (e) => {
 
 // ---------------- geometry / hit tests ----------------
 function pinsOf(c: Component) { return PARTS[c.type].pins(c.props); }
-function hitPin(w: Pt, tolPx = 18): PinRef | null {
+function hitPin(w: Pt, tolPx = coarse ? 22 : 14): PinRef | null {
   let best: PinRef | null = null, bd = tolPx / cam.s;
   for (const c of circuit.components) pinsOf(c).forEach((p, pi) => {
     const q = pinWorld(c, p), d = Math.hypot(q.x - w.x, q.y - w.y);
@@ -94,7 +97,7 @@ function segDist(p: Pt, a: Pt, b: Pt) {
   const t = l ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l)) : 0;
   return Math.hypot(p.x - a.x - t * dx, p.y - a.y - t * dy);
 }
-function hitWire(w: Pt, tolPx = 12): Wire | null {
+function hitWire(w: Pt, tolPx = coarse ? 16 : 10): Wire | null {
   let best: Wire | null = null, bd = tolPx / cam.s;
   for (const wire of circuit.wires) {
     const pts = wirePath(sim, comps, wire); if (!pts) continue;
@@ -142,12 +145,13 @@ function setWidth(c: Component, w: number) {
   rebuild();
 }
 function fit() {
-  const r = canvas.getBoundingClientRect();
-  if (!circuit.components.length || !r.width) { cam.s = 1; cam.x = -r.width / 2; cam.y = -r.height / 2; return; }
+  const r = { width: cssW, height: cssH };
+  if (!circuit.components.length || !r.width) { cam.s = coarse ? 1.5 : 1; cam.x = -r.width / 2 / cam.s; cam.y = -r.height / 2 / cam.s; return; }
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const c of circuit.components) { const s = rotatedSize(c); x0 = Math.min(x0, c.x - s.w / 2); x1 = Math.max(x1, c.x + s.w / 2); y0 = Math.min(y0, c.y - s.h / 2 - 20); y1 = Math.max(y1, c.y + s.h / 2); }
   const pad = 60;
-  cam.s = Math.min(2.5, Math.max(0.2, Math.min(r.width / (x1 - x0 + pad * 2), r.height / (y1 - y0 + pad * 2))));
+  // cap at 2x: on a tablet a 20-unit pin pitch becomes 40 CSS px, a comfortable finger target
+  cam.s = Math.min(2, Math.max(0.2, Math.min(r.width / (x1 - x0 + pad * 2), r.height / (y1 - y0 + pad * 2))));
   cam.x = (x0 + x1) / 2 - r.width / 2 / cam.s; cam.y = (y0 + y1) / 2 - r.height / 2 / cam.s;
   scheduleSave();
 }
@@ -341,11 +345,11 @@ for (const type of TRAY_ORDER) {
   const def = PARTS[type];
   const el = document.createElement('div'); el.className = 'part';
   const icon = document.createElement('canvas'); const dpr = devicePixelRatio || 1;
-  icon.width = 70 * dpr; icon.height = 40 * dpr; icon.style.width = '70px'; icon.style.height = '40px';
+  icon.width = 84 * dpr; icon.height = 44 * dpr; icon.style.width = '84px'; icon.style.height = '44px';
   const ic = icon.getContext('2d')!; ic.scale(dpr, dpr);
   const demo: Component = { id: 'icon', type, x: 0, y: 0, rot: 0, props: type === 'SPLIT' || type === 'MERGE' ? { width: 2 } : {} };
-  const s = def.size(demo.props), k = Math.min(60 / s.w, 36 / s.h);
-  ic.translate(35, 20); ic.scale(k, k); drawComponent(ic, demo, null, false);
+  const s = def.size(demo.props), k = Math.min(76 / s.w, 40 / s.h);
+  ic.translate(42, 22); ic.scale(k, k); drawComponent(ic, demo, null, false);
   const name = document.createElement('span'); name.textContent = def.label;
   el.append(icon, name); tray.append(el);
   let ghost: HTMLElement | null = null, start: Pt | null = null;
@@ -356,7 +360,7 @@ for (const type of TRAY_ORDER) {
     if (!start) return;
     if (!ghost && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 6) {
       ghost = icon.cloneNode() as HTMLElement; (ghost as HTMLCanvasElement).getContext('2d')!.drawImage(icon, 0, 0);
-      ghost.className = 'ghost'; ghost.style.width = 70 * cam.s * 1.3 + 'px'; ghost.style.height = 40 * cam.s * 1.3 + 'px'; document.body.append(ghost);
+      ghost.className = 'ghost'; ghost.style.width = 84 * cam.s + 'px'; ghost.style.height = 44 * cam.s + 'px'; document.body.append(ghost);
     }
     if (ghost) { ghost.style.left = e.clientX + 'px'; ghost.style.top = e.clientY + 'px'; }
   });
@@ -373,7 +377,7 @@ for (const type of TRAY_ORDER) {
 }
 
 // ---------------- top bar ----------------
-function togglePlay() { running = !running; $('play').textContent = running ? '⏸' : '▶'; }
+function togglePlay() { running = !running; $('play').textContent = running ? 'Pause' : 'Run'; }
 $('play').addEventListener('click', togglePlay);
 $('step').addEventListener('click', () => { if (running) togglePlay(); sim.tick(); });
 $<HTMLSelectElement>('speed').addEventListener('change', (e) => (ticksPerSec = Number((e.target as HTMLSelectElement).value)));
@@ -387,11 +391,27 @@ $('clear').addEventListener('click', () => {
 });
 
 // ---------------- render loop ----------------
+/** Size the backing store from the stage's CSS box (never from the canvas itself, which has an intrinsic size). */
 function resize() {
-  const dpr = devicePixelRatio || 1, r = canvas.getBoundingClientRect();
-  canvas.width = Math.round(r.width * dpr); canvas.height = Math.round(r.height * dpr);
+  const dpr = devicePixelRatio || 1;
+  const w = stage.clientWidth, h = stage.clientHeight;
+  if (!w || !h) return;
+  // keep the world point at the centre of the view fixed across rotation / resize
+  if (cssW && cssH) { cam.x += (cssW - w) / 2 / cam.s; cam.y += (cssH - h) / 2 / cam.s; }
+  cssW = w; cssH = h;
+  canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+  draw();
 }
-window.addEventListener('resize', resize);
+/** App height follows the *visible* viewport (Safari toolbars, rotation, home-screen mode). */
+function layoutViewport() {
+  const vv = window.visualViewport;
+  document.documentElement.style.setProperty('--app-h', `${vv ? vv.height : innerHeight}px`);
+}
+layoutViewport();
+window.visualViewport?.addEventListener('resize', layoutViewport);
+window.addEventListener('resize', layoutViewport);
+window.addEventListener('orientationchange', () => setTimeout(() => { layoutViewport(); resize(); }, 250));
+new ResizeObserver(resize).observe(stage);
 let last = performance.now(), lastStatus = 0;
 function frame(now: number) {
   const dt = Math.min(0.1, (now - last) / 1000); last = now;
@@ -415,7 +435,7 @@ function draw() {
   ctx.fillStyle = '#14161c'; ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.setTransform(cam.s * dpr, 0, 0, cam.s * dpr, -cam.x * cam.s * dpr, -cam.y * cam.s * dpr);
   // grid dots
-  const W = canvas.width / dpr / cam.s, H = canvas.height / dpr / cam.s;
+  const W = cssW / cam.s, H = cssH / cam.s;
   const step = cam.s < 0.5 ? 100 : 20;
   ctx.fillStyle = '#2a2e3a';
   const r = 1.2 / cam.s;
@@ -430,7 +450,7 @@ function draw() {
   // pins
   for (const c of circuit.components) pinsOf(c).forEach((p, pi) => {
     const q = pinWorld(c, p);
-    ctx.beginPath(); ctx.arc(q.x, q.y, p.width > 1 ? 4.5 : 3.5, 0, Math.PI * 2);
+    ctx.beginPath(); ctx.arc(q.x, q.y, (p.width > 1 ? 4.5 : 3.5) * (coarse ? 1.25 : 1), 0, Math.PI * 2);
     ctx.fillStyle = '#c9cedb'; ctx.fill();
   });
   // wire being drawn
