@@ -36,10 +36,10 @@
     <button id="clear">New</button>
     <input id="file" type="file" accept=".json,application/json" hidden />
   </header>
-  <div id="stage"><canvas id="canvas"></canvas></div>
+  <div id="stage"><canvas id="canvas"></canvas><div id="viewbar" hidden><button id="viewback">← Back</button><span id="viewtitle"></span></div></div>
   <div id="popup" hidden></div>
   <div id="menu" hidden></div>
-  <nav id="tray"></nav>
+  <nav id="tray"><div id="tabs"></div><div id="parts"></div></nav>
 </div>
 <script type="module" src="/src/main.ts"></script>
 </body>

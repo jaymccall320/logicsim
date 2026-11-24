@@ -1,5 +1,5 @@
 import './style.css';
-import { PARTS, TRAY_ORDER, pinDir, pinWorld, rotatedSize, width } from './engine/parts';
+import { PARTS, pinDir, pinWorld, rotatedSize, width } from './engine/parts';
 import { Sim } from './engine/sim';
 import { Circuit, Component, PinRef, Wire } from './engine/types';
 import { drawComponent, drawWire, formatBits, routeBetween, wirePath, COL } from './render';
@@ -40,7 +40,7 @@ function rebuild() {
   scheduleSave();
 }
 function pushUndo() { undoStack.push(JSON.stringify(circuit)); if (undoStack.length > 100) undoStack.shift(); }
-function undo() { const s = undoStack.pop(); if (s) { circuit = JSON.parse(s); rebuild(); } }
+function undo() { if (readOnly()) return; const s = undoStack.pop(); if (s) { circuit = JSON.parse(s); rebuild(); } }
 
 // ---------------- persistence ----------------
 let saveTimer = 0;
@@ -79,15 +79,16 @@ $('file').addEventListener('change', async (e) => {
 function pinsOf(c: Component) { return PARTS[c.type].pins(c.props); }
 function hitPin(w: Pt, tolPx = coarse ? 22 : 14): PinRef | null {
   let best: PinRef | null = null, bd = tolPx / cam.s;
-  for (const c of circuit.components) pinsOf(c).forEach((p, pi) => {
+  for (const c of cur().components) pinsOf(c).forEach((p, pi) => {
     const q = pinWorld(c, p), d = Math.hypot(q.x - w.x, q.y - w.y);
     if (d < bd) { bd = d; best = { c: c.id, p: pi }; }
   });
   return best;
 }
 function hitComp(w: Pt): Component | null {
-  for (let i = circuit.components.length - 1; i >= 0; i--) {
-    const c = circuit.components[i], s = rotatedSize(c);
+  const list = cur().components;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const c = list[i], s = rotatedSize(c);
     if (Math.abs(w.x - c.x) <= s.w / 2 + 2 && Math.abs(w.y - c.y) <= s.h / 2 + 2) return c;
   }
   return null;
@@ -99,19 +100,19 @@ function segDist(p: Pt, a: Pt, b: Pt) {
 }
 function hitWire(w: Pt, tolPx = coarse ? 16 : 10): Wire | null {
   let best: Wire | null = null, bd = tolPx / cam.s;
-  for (const wire of circuit.wires) {
-    const pts = wirePath(sim, comps, wire); if (!pts) continue;
+  for (const wire of cur().wires) {
+    const pts = wirePath(sim, cur().map, wire); if (!pts) continue;
     for (let i = 1; i < pts.length; i++) { const d = segDist(w, pts[i - 1], pts[i]); if (d < bd) { bd = d; best = wire; } }
   }
   return best;
 }
-function pinWidth(r: PinRef) { const c = comps.get(r.c)!; return pinsOf(c)[r.p].width; }
+function pinWidth(r: PinRef) { const c = cur().map.get(r.c)!; return pinsOf(c)[r.p].width; }
 
 // ---------------- actions ----------------
-function addPart(type: string, at: Pt) {
+function addPart(type: string, at: Pt, props?: Component['props']) {
+  if (readOnly()) return;
   pushUndo();
-  const c: Component = { id: uid(), type, x: snap(at.x), y: snap(at.y), rot: 0, props: type === 'IN' ? { value: 0 } : {} };
-  if (type === 'SPLIT' || type === 'MERGE') c.props.width = 4;
+  const c: Component = { id: uid(), type, x: snap(at.x), y: snap(at.y), rot: 0, props: { ...(type === 'IN' ? { value: 0 } : {}), ...props } };
   circuit.components.push(c); selected = c.id; rebuild();
 }
 function addWire(a: PinRef, b: PinRef) {
@@ -146,9 +147,10 @@ function setWidth(c: Component, w: number) {
 }
 function fit() {
   const r = { width: cssW, height: cssH };
-  if (!circuit.components.length || !r.width) { cam.s = coarse ? 1.5 : 1; cam.x = -r.width / 2 / cam.s; cam.y = -r.height / 2 / cam.s; return; }
+  const list = cur().components;
+  if (!list.length || !r.width) { cam.s = coarse ? 1.5 : 1; cam.x = -r.width / 2 / cam.s; cam.y = -r.height / 2 / cam.s; return; }
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  for (const c of circuit.components) { const s = rotatedSize(c); x0 = Math.min(x0, c.x - s.w / 2); x1 = Math.max(x1, c.x + s.w / 2); y0 = Math.min(y0, c.y - s.h / 2 - 20); y1 = Math.max(y1, c.y + s.h / 2); }
+  for (const c of list) { const s = rotatedSize(c); x0 = Math.min(x0, c.x - s.w / 2); x1 = Math.max(x1, c.x + s.w / 2); y0 = Math.min(y0, c.y - s.h / 2 - 20); y1 = Math.max(y1, c.y + s.h / 2); }
   const pad = 60;
   // cap at 2x: on a tablet a 20-unit pin pitch becomes 40 CSS px, a comfortable finger target
   cam.s = Math.min(2, Math.max(0.2, Math.min(r.width / (x1 - x0 + pad * 2), r.height / (y1 - y0 + pad * 2))));
@@ -174,6 +176,8 @@ function openMenu(sx: number, sy: number, target: { comp?: Component; wire?: Wir
   if (target.comp) {
     const c = target.comp, def = PARTS[c.type];
     const h = document.createElement('div'); h.className = 'row'; h.innerHTML = `<span>${def.label}${c.props.label ? ' · ' + c.props.label : ''}</span>`; menu.append(h);
+    if (def.chip) menu.append(btn('🔍 Look inside', () => openChip(c)));
+    if (readOnly()) { menu.hidden = false; placeMenu(sx, sy); return; }
     menu.append(btn('⟳ Rotate', () => { pushUndo(); c.rot = (c.rot + 1) & 3; rebuild(); }));
     if (def.hasWidth) {
       const row = document.createElement('div'); row.className = 'row';
@@ -191,12 +195,15 @@ function openMenu(sx: number, sy: number, target: { comp?: Component; wire?: Wir
     }));
     menu.append(btn('🗑 Delete', () => deleteComp(c.id), 'danger'));
   } else if (target.wire) {
+    if (readOnly()) return;
     const w = target.wire;
     const h = document.createElement('div'); h.className = 'row';
     h.innerHTML = `<span>Wire · ${pinWidth(w.a)}-bit</span>`; menu.append(h);
     menu.append(btn('🗑 Delete wire', () => deleteWire(w.id), 'danger'));
   }
-  menu.hidden = false;
+  menu.hidden = false; placeMenu(sx, sy);
+}
+function placeMenu(sx: number, sy: number) {
   const r = menu.getBoundingClientRect();
   menu.style.left = Math.min(sx, innerWidth - r.width - 8) + 'px';
   menu.style.top = Math.min(sy, innerHeight - r.height - 8) + 'px';
@@ -250,6 +257,7 @@ canvas.addEventListener('pointermove', (e) => {
   const p = local(e), w = toWorld(p.x, p.y);
   const moved = Math.hypot(p.x - downS.x, p.y - downS.y) > 8;
   if (moved) clearTimeout(lpTimer);
+  if (readOnly() && moved && (mode === 'press-comp' || mode === 'wire')) { mode = 'pan'; wireFrom = null; }
   if (mode === 'press-comp' && moved) { pushUndo(); mode = 'drag'; selected = target!.id; hidePopup(); }
   if ((mode === 'press-empty' || mode === 'press-wire') && moved) { mode = 'pan'; }
   if (mode === 'drag' && target) {
@@ -271,16 +279,16 @@ function endPointer(e: PointerEvent) {
   if (e.type === 'pointercancel') { mode = 'none'; wireFrom = null; return; }
   switch (mode) {
     case 'wire':
-      if (wireHover) addWire(wireFrom!, wireHover);
+      if (wireHover && !readOnly()) addWire(wireFrom!, wireHover);
       else if (!moved) { // tap on a pin: input body toggle if it's an input part, else inspect pin
-        const c = comps.get(wireFrom!.c)!;
-        if (c.type === 'IN') toggleInput(c);
+        const c = cur().map.get(wireFrom!.c)!;
+        if (c.type === 'IN' && !readOnly()) toggleInput(c);
         else { inspect = { kind: 'pin', ref: wireFrom!, sx: e.clientX, sy: e.clientY }; popup.hidden = false; }
       }
       wireFrom = null; wireTo = null; wireHover = null; break;
     case 'press-comp':
       selected = target!.id; hidePopup();
-      if (target!.type === 'IN') toggleInput(target!);
+      if (target!.type === 'IN' && !readOnly()) toggleInput(target!);
       break;
     case 'drag': rebuild(); break;
     case 'press-wire':
@@ -332,6 +340,8 @@ for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) document.addEv
 document.addEventListener('touchmove', (e) => { if (!(e.target as HTMLElement).closest('#tray')) e.preventDefault(); }, { passive: false });
 document.addEventListener('dblclick', (e) => e.preventDefault());
 window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && readOnly()) { closeChip(); return; }
+  if (readOnly()) return;
   if ((e.key === 'Delete' || e.key === 'Backspace') && selected) deleteComp(selected);
   else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedWire) { deleteWire(selectedWire); hidePopup(); }
   else if (e.key === 'r' && selected) { const c = comps.get(selected); if (c) { pushUndo(); c.rot = (c.rot + 1) & 3; rebuild(); } }
@@ -339,19 +349,47 @@ window.addEventListener('keydown', (e) => {
   else if (e.key === ' ') { e.preventDefault(); togglePlay(); }
 });
 
-// ---------------- parts tray ----------------
-const tray = $('tray');
-for (const type of TRAY_ORDER) {
-  const def = PARTS[type];
+// ---------------- parts tray (folders) ----------------
+interface TrayItem { type: string; label?: string; props?: Component['props'] }
+interface Folder { id: string; name: string; items: () => TrayItem[]; empty?: string }
+const FOLDERS: Folder[] = [
+  { id: 'gates', name: 'Gates', items: () => ['NAND', 'NOT', 'AND', 'OR', 'NOR', 'XOR', 'XNOR', 'BUF'].map((type) => ({ type })) },
+  { id: 'conn', name: 'Connectors', items: () => [{ type: 'SPLIT', props: { width: 4 } }, { type: 'MERGE', props: { width: 4 } }, { type: 'TRI', label: 'Tri-state' }] },
+  { id: 'in', name: 'Inputs', items: () => [{ type: 'IN', label: 'Switch', props: { value: 0 } }, { type: 'IN', label: '4-bit In', props: { width: 4, value: 0 } }, { type: 'IN', label: '8-bit In', props: { width: 8, value: 0 } }] },
+  { id: 'out', name: 'Outputs', items: () => [{ type: 'OUT', label: 'LED' }, { type: 'OUT', label: '4-bit Out', props: { width: 4 } }, { type: 'OUT', label: '8-bit Out', props: { width: 8 } }] },
+  { id: 'custom', name: 'Custom Chips', items: () => Object.values(PARTS).filter((d) => d.chip && !d.chip.builtin).map((d) => ({ type: d.type })),
+    empty: 'No custom chips yet. Soon you will select part of a circuit and save it as a chip, and it will appear here.' },
+];
+const tabsEl = $('tabs'), partsEl = $('parts');
+let folder = localStorage.getItem('logicsim.folder') ?? 'gates';
+if (!FOLDERS.some((f) => f.id === folder)) folder = 'gates';
+function renderTabs() {
+  tabsEl.innerHTML = '';
+  for (const f of FOLDERS) {
+    const b = document.createElement('button'); b.className = 'tab' + (f.id === folder ? ' active' : ''); b.textContent = f.name;
+    b.dataset.folder = f.id;
+    b.addEventListener('click', () => { folder = f.id; localStorage.setItem('logicsim.folder', folder); renderTabs(); renderParts(); });
+    tabsEl.append(b);
+  }
+}
+function renderParts() {
+  partsEl.innerHTML = '';
+  const f = FOLDERS.find((x) => x.id === folder)!, items = f.items();
+  if (!items.length) { const e = document.createElement('div'); e.className = 'empty'; e.textContent = f.empty ?? 'Nothing here yet.'; partsEl.append(e); return; }
+  for (const it of items) partsEl.append(makeTile(it));
+}
+function makeTile(item: TrayItem) {
+  const { type } = item, def = PARTS[type];
   const el = document.createElement('div'); el.className = 'part';
   const icon = document.createElement('canvas'); const dpr = devicePixelRatio || 1;
   icon.width = 84 * dpr; icon.height = 44 * dpr; icon.style.width = '84px'; icon.style.height = '44px';
   const ic = icon.getContext('2d')!; ic.scale(dpr, dpr);
-  const demo: Component = { id: 'icon', type, x: 0, y: 0, rot: 0, props: type === 'SPLIT' || type === 'MERGE' ? { width: 2 } : {} };
+  const demoProps = type === 'SPLIT' || type === 'MERGE' ? { width: 2 } : { ...item.props };
+  const demo: Component = { id: 'icon', type, x: 0, y: 0, rot: 0, props: demoProps };
   const s = def.size(demo.props), k = Math.min(76 / s.w, 40 / s.h);
   ic.translate(42, 22); ic.scale(k, k); drawComponent(ic, demo, null, false);
-  const name = document.createElement('span'); name.textContent = def.label;
-  el.append(icon, name); tray.append(el);
+  const name = document.createElement('span'); name.textContent = item.label ?? def.label;
+  el.append(icon, name);
   let ghost: HTMLElement | null = null, start: Pt | null = null;
   el.addEventListener('pointerdown', (e) => {
     e.preventDefault(); el.setPointerCapture(e.pointerId); start = { x: e.clientX, y: e.clientY };
@@ -369,12 +407,43 @@ for (const type of TRAY_ORDER) {
     const r = canvas.getBoundingClientRect();
     if (ghost) {
       ghost.remove(); ghost = null;
-      if (e.type === 'pointerup' && e.clientY < r.bottom && e.clientY > r.top) addPart(type, toWorld(e.clientX - r.left, e.clientY - r.top));
-    } else if (e.type === 'pointerup') addPart(type, toWorld(r.width / 2 + (Math.random() - .5) * 60, r.height / 2 + (Math.random() - .5) * 60));
+      if (e.type === 'pointerup' && e.clientY < r.bottom && e.clientY > r.top) addPart(type, toWorld(e.clientX - r.left, e.clientY - r.top), item.props);
+    } else if (e.type === 'pointerup') addPart(type, toWorld(r.width / 2 + (Math.random() - .5) * 60, r.height / 2 + (Math.random() - .5) * 60), item.props);
     start = null;
   };
   el.addEventListener('pointerup', finish); el.addEventListener('pointercancel', finish);
+  return el;
 }
+renderTabs(); renderParts();
+
+// ---------------- look inside a chip (read-only, live values from the main simulation) ----------------
+interface View { components: Component[]; wires: Wire[]; map: Map<string, Component>; title: string; savedCam?: typeof cam }
+const viewStack: View[] = [];
+function cur() { return viewStack[viewStack.length - 1] ?? { components: circuit.components, wires: circuit.wires, map: comps, title: '' }; }
+const readOnly = () => viewStack.length > 0;
+function openChip(c: Component) {
+  const chip = PARTS[c.type].chip; if (!chip) return;
+  const pre = c.id + '/', w = width(c.props);
+  const components = chip.circuit.components.map((ic) => ({ ...ic, id: pre + ic.id, props: { ...ic.props, ...(PARTS[ic.type]?.hasWidth && w > 1 ? { width: w } : {}) } }));
+  const wires = chip.circuit.wires.map((iw) => ({ id: pre + iw.id, a: { c: pre + iw.a.c, p: iw.a.p }, b: { c: pre + iw.b.c, p: iw.b.p } }));
+  const path = [...viewStack.map((v) => v.title.split(' › ').pop()), chip.label].filter(Boolean).join(' › ');
+  viewStack.push({ components, wires, map: new Map(components.map((x) => [x.id, x])), title: path, savedCam: { ...cam } });
+  selected = null; hidePopup(); closeMenu(); updateViewUI(); fit();
+}
+function closeChip() {
+  const v = viewStack.pop(); if (!v) return;
+  if (v.savedCam) Object.assign(cam, v.savedCam);
+  hidePopup(); updateViewUI();
+}
+function updateViewUI() {
+  const bar = $('viewbar'), ro = readOnly();
+  bar.hidden = !ro; $('tray').classList.toggle('disabled', ro);
+  if (ro) {
+    const v = cur(), nands = v.components.filter((x) => x.type === 'NAND').length, chips = v.components.filter((x) => PARTS[x.type]?.chip).length;
+    $('viewtitle').textContent = `Inside ${v.title}: ${nands} NAND${nands === 1 ? '' : 's'}${chips ? `, ${chips} chip${chips === 1 ? '' : 's'}` : ''} (live, read-only)`;
+  }
+}
+$('viewback').addEventListener('click', closeChip);
 
 // ---------------- top bar ----------------
 function togglePlay() { running = !running; $('play').textContent = running ? 'Pause' : 'Run'; }
@@ -442,22 +511,23 @@ function draw() {
   for (let x = Math.floor(cam.x / step) * step; x < cam.x + W; x += step)
     for (let y = Math.floor(cam.y / step) * step; y < cam.y + H; y += step) ctx.fillRect(x - r, y - r, r * 2, r * 2);
   // wires
-  for (const w of circuit.wires) {
-    const pts = wirePath(sim, comps, w); if (!pts) continue;
+  const V = cur();
+  for (const w of V.wires) {
+    const pts = wirePath(sim, V.map, w); if (!pts) continue;
     drawWire(ctx, pts, sim.pinValue(w.a.c, w.a.p), pinWidth(w.a), w.id === selectedWire, sim.badWires.has(w.id));
   }
-  for (const c of circuit.components) drawComponent(ctx, c, sim, c.id === selected);
+  for (const c of V.components) drawComponent(ctx, c, sim, c.id === selected);
   // pins
-  for (const c of circuit.components) pinsOf(c).forEach((p, pi) => {
+  for (const c of V.components) pinsOf(c).forEach((p, pi) => {
     const q = pinWorld(c, p);
     ctx.beginPath(); ctx.arc(q.x, q.y, (p.width > 1 ? 4.5 : 3.5) * (coarse ? 1.25 : 1), 0, Math.PI * 2);
     ctx.fillStyle = '#c9cedb'; ctx.fill();
   });
   // wire being drawn
   if (mode === 'wire' && wireFrom && wireTo) {
-    const c = comps.get(wireFrom.c)!, p = pinsOf(c)[wireFrom.p];
+    const c = cur().map.get(wireFrom.c)!, p = pinsOf(c)[wireFrom.p];
     let end = wireTo, endDir = null;
-    if (wireHover) { const hc = comps.get(wireHover.c)!, hp = pinsOf(hc)[wireHover.p]; end = pinWorld(hc, hp); endDir = pinDir(hc, hp); }
+    if (wireHover) { const hc = cur().map.get(wireHover.c)!, hp = pinsOf(hc)[wireHover.p]; end = pinWorld(hc, hp); endDir = pinDir(hc, hp); }
     const pts = routeBetween(pinWorld(c, p), pinDir(c, p), end, endDir);
     ctx.save(); ctx.globalAlpha = 0.8;
     drawWire(ctx, pts, sim.pinValue(wireFrom.c, wireFrom.p), p.width, true, !!wireHover && pinWidth(wireHover) !== p.width);
@@ -468,11 +538,11 @@ function draw() {
   if (inspect) {
     let bits, title;
     if (inspect.kind === 'wire') {
-      const w = circuit.wires.find((x) => x.id === (inspect as { id: string }).id);
+      const w = V.wires.find((x) => x.id === (inspect as { id: string }).id);
       if (!w) { hidePopup(); return; }
       bits = sim.pinValue(w.a.c, w.a.p); title = `${bits.length}-bit wire`;
     } else {
-      const c = comps.get(inspect.ref.c); if (!c) { hidePopup(); return; }
+      const c = V.map.get(inspect.ref.c); if (!c) { hidePopup(); return; }
       bits = sim.pinValue(c.id, inspect.ref.p); title = `${PARTS[c.type].label}.${pinsOf(c)[inspect.ref.p].name}`;
     }
     const conflict = bits.some((b) => b === 3);
@@ -482,5 +552,5 @@ function draw() {
 }
 
 // debugging / automation hook
-(window as unknown as { logicsim: unknown }).logicsim = { get circuit() { return circuit; }, get sim() { return sim; }, cam, fit, rebuild };
+(window as unknown as { logicsim: unknown }).logicsim = { get circuit() { return circuit; }, get sim() { return sim; }, cam, fit, rebuild, openChip, closeChip };
 init();

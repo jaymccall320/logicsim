@@ -1,5 +1,6 @@
 import { PARTS, PartDef } from './parts';
-import { Bit, Circuit, Component, V0, VX, VZ } from './types';
+import { flatten } from './chips';
+import { Bit, Circuit, Component, PinRef, V0, VX, VZ } from './types';
 
 /**
  * Event-driven, bit-level simulator with per-component propagation delay (transport delay, in ticks).
@@ -39,8 +40,14 @@ export class Sim {
   /** Wires that could not be connected (width mismatch / dangling). */
   badWires = new Set<string>();
 
-  constructor(circuit: Circuit, prev?: Sim) {
-    this.comps = circuit.components.filter((c) => PARTS[c.type]);
+  /** chip instance id -> chip pin -> flat pin (PORT inside the chip) */
+  private ext = new Map<string, PinRef[]>();
+
+  constructor(source: Circuit, prev?: Sim) {
+    const flat = flatten({ ...source, components: source.components.filter((c) => PARTS[c.type]) });
+    const circuit = flat.circuit;
+    this.ext = flat.ext;
+    this.comps = circuit.components;
     this.defs = this.comps.map((c) => PARTS[c.type]);
     this.compile(circuit, prev);
   }
@@ -207,11 +214,15 @@ export class Sim {
 
   // ---- inspection helpers ----
   pinValue(compId: string, pin: number): Bit[] {
+    const e = this.ext.get(compId)?.[pin];
+    if (e) return this.pinValue(e.c, e.p);
     const ci = this.compIndex.get(compId);
     if (ci === undefined) return [];
     return (this.pinNodes[ci][pin] ?? []).map((n) => this.nodeVal[n] as Bit);
   }
   pinNodesOf(compId: string, pin: number): number[] {
+    const e = this.ext.get(compId)?.[pin];
+    if (e) return this.pinNodesOf(e.c, e.p);
     const ci = this.compIndex.get(compId);
     return ci === undefined ? [] : this.pinNodes[ci][pin] ?? [];
   }

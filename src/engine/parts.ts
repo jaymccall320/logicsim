@@ -20,13 +20,17 @@ export interface PartDef {
   eval?(ins: Bit[][], outs: Bit[][], comp: Component): void;
   /** Pure wiring parts (splitter/merger) alias bits instead of evaluating: [pinA, bitA, pinB, bitB]. */
   alias?(p: Props): Array<[number, number, number, number]>;
+  /** Composite part: flattened into its internal circuit before simulation. */
+  chip?: import('./chips').ChipDef;
+  /** Drawing style for gate symbols. */
+  symbol?: { shape: 'and' | 'or' | 'xor' | 'buf'; bubble: boolean };
 }
 
 export const width = (p: Props) => Math.max(1, Math.min(32, p.width ?? 1));
 const inBit = (b: Bit): Bit => (b === VZ ? V0 : b); // floating gate inputs read as 0 (pull-down)
 
 const NAND: PartDef = {
-  type: 'NAND', label: 'NAND', hasWidth: true, maxWidth: 32, delay: 1,
+  type: 'NAND', label: 'NAND', hasWidth: true, maxWidth: 32, delay: 1, symbol: { shape: 'and', bubble: true },
   size: () => ({ w: 80, h: 40 }),
   pins: (p) => [
     { name: 'A', dir: 'in', width: width(p), x: 0, y: 10 },
@@ -97,8 +101,14 @@ const MERGE: PartDef = {
   alias: (p) => Array.from({ length: width(p) }, (_, i) => [i, 0, width(p), i] as [number, number, number, number]),
 };
 
-export const PARTS: Record<string, PartDef> = { NAND, TRI, IN: INPUT, OUT: OUTPUT, SPLIT, MERGE };
-export const TRAY_ORDER = ['NAND', 'TRI', 'IN', 'OUT', 'SPLIT', 'MERGE'];
+/** Chip boundary pin, only used inside chip definitions (pure wiring, zero delay). */
+const PORT: PartDef = {
+  type: 'PORT', label: 'Port', hasWidth: true, maxWidth: 32, delay: 0,
+  size: () => ({ w: 40, h: 40 }),
+  pins: (p) => [{ name: p.label ?? 'P', dir: p.dir === 'out' ? 'in' : 'out', width: width(p), x: p.dir === 'out' ? 0 : 40, y: 20 }],
+};
+
+export const PARTS: Record<string, PartDef> = { NAND, TRI, IN: INPUT, OUT: OUTPUT, SPLIT, MERGE, PORT };
 
 // ---- geometry (shared by UI; engine itself does not need it) ----
 export function rotatedSize(c: Component) {

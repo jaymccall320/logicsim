@@ -71,17 +71,17 @@ export function drawComponent(ctx: CanvasRenderingContext2D, c: Component, sim: 
     ctx.save(); ctx.strokeStyle = stateColor(st); ctx.lineWidth = p.width > 1 ? 5 : 3;
     ctx.beginPath(); ctx.moveTo(p.x, p.y);
     const inward = stubInward(p, s);
-    const len = c.type === 'SPLIT' ? (p.dir === 'in' ? 12 : 22) : c.type === 'MERGE' ? (p.dir === 'in' ? 22 : 12) : 10;
+    const sh = def.symbol?.shape;
+    const len = p.dir === 'in' && sh === 'or' ? 14 : p.dir === 'in' && sh === 'xor' ? 9 : p.dir === 'out' && def.symbol && !def.symbol.bubble ? (sh === 'buf' ? 26 : 20) : c.type === 'SPLIT' ? (p.dir === 'in' ? 12 : 22) : c.type === 'MERGE' ? (p.dir === 'in' ? 22 : 12) : 10;
     ctx.lineTo(p.x + inward.x * len, p.y + inward.y * len); ctx.stroke(); ctx.restore();
   });
+  if (def.symbol) {
+    drawGate(ctx, def.symbol.shape, def.symbol.bubble, s.h);
+    if ((c.props.width ?? 1) > 1) label(ctx, String(c.props.width), def.symbol.shape === 'buf' ? 22 : 30, s.h / 2, 11, COL.stroke);
+  } else if (def.chip) {
+    rr(ctx, 10, 2, s.w - 20, s.h - 4, 6); ctx.fill(); ctx.stroke(); label(ctx, def.label, s.w / 2, s.h / 2, 12, COL.stroke);
+  }
   switch (c.type) {
-    case 'NAND': {
-      ctx.beginPath(); ctx.moveTo(10, 2); ctx.lineTo(42, 2); ctx.arc(42, 20, 18, -Math.PI / 2, Math.PI / 2); ctx.lineTo(10, 38); ctx.closePath();
-      ctx.fill(); ctx.stroke();
-      ctx.beginPath(); ctx.arc(65, 20, 5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-      if ((c.props.width ?? 1) > 1) label(ctx, String(c.props.width), 28, 20, 11, COL.stroke);
-      break;
-    }
     case 'TRI': {
       ctx.beginPath(); ctx.moveTo(10, 4); ctx.lineTo(50, 20); ctx.lineTo(10, 36); ctx.closePath(); ctx.fill(); ctx.stroke();
       label(ctx, 'EN', 22, 20, 9, COL.stroke);
@@ -102,6 +102,12 @@ export function drawComponent(ctx: CanvasRenderingContext2D, c: Component, sim: 
         ctx.fillStyle = st === 'on' ? '#ff5a3c' : st === 'x' ? COL.x : '#3a2a2a'; ctx.fill(); ctx.stroke();
         if (st === 'on') { ctx.save(); ctx.globalAlpha = .35; ctx.beginPath(); ctx.arc(24, 20, 19, 0, Math.PI * 2); ctx.fill(); ctx.restore(); }
       } else { rr(ctx, 10, 2, s.w - 12, s.h - 4, 8); ctx.fill(); ctx.stroke(); label(ctx, hex(bits), 10 + (s.w - 12) / 2, 20, 13, stateColor(st)); }
+      break;
+    }
+    case 'PORT': {
+      rr(ctx, c.props.dir === 'out' ? 10 : 2, 4, 28, 32, 6); ctx.fillStyle = '#20242e'; ctx.fill(); ctx.setLineDash([4, 3]); ctx.stroke(); ctx.setLineDash([]);
+      const st = bitsState(val(0));
+      ctx.beginPath(); ctx.arc(c.props.dir === 'out' ? 24 : 16, 20, 7, 0, Math.PI * 2); ctx.fillStyle = stateColor(st); ctx.fill();
       break;
     }
     case 'SPLIT': case 'MERGE': {
@@ -133,4 +139,20 @@ function rr(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: n
 export function label(ctx: CanvasRenderingContext2D, t: string, x: number, y: number, size: number, color: string) {
   ctx.save(); ctx.fillStyle = color; ctx.font = `600 ${size}px -apple-system, system-ui, sans-serif`;
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(t, x, y); ctx.restore();
+}
+
+/** Standard gate symbols in an 80 x h box: inputs on the left (x=0), output at x=80. */
+function drawGate(ctx: CanvasRenderingContext2D, shape: 'and' | 'or' | 'xor' | 'buf', bubble: boolean, h: number) {
+  const m = h / 2, t = m - 18, b = m + 18;
+  ctx.beginPath();
+  let tip = 60;
+  if (shape === 'and') { ctx.moveTo(10, t); ctx.lineTo(42, t); ctx.arc(42, m, 18, -Math.PI / 2, Math.PI / 2); ctx.lineTo(10, b); ctx.closePath(); }
+  else if (shape === 'buf') { tip = 54; ctx.moveTo(12, m - 16); ctx.lineTo(tip, m); ctx.lineTo(12, m + 16); ctx.closePath(); }
+  else {
+    const x0 = shape === 'xor' ? 14 : 10; tip = 62;
+    ctx.moveTo(x0, t); ctx.quadraticCurveTo(x0 + 34, t, tip, m); ctx.quadraticCurveTo(x0 + 34, b, x0, b); ctx.quadraticCurveTo(x0 + 12, m, x0, t); ctx.closePath();
+  }
+  ctx.fill(); ctx.stroke();
+  if (shape === 'xor') { ctx.beginPath(); ctx.moveTo(7, t); ctx.quadraticCurveTo(19, m, 7, b); ctx.stroke(); }
+  if (bubble) { ctx.beginPath(); ctx.arc(tip + 5, m, 5, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); }
 }

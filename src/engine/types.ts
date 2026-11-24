@@ -7,6 +7,7 @@ export interface Props {
   value?: number;   // current value of an input pin (bit field)
   label?: string;
   delay?: number;   // propagation delay in ticks (default per part)
+  dir?: 'in' | 'out'; // PORT parts inside a chip: which side of the chip boundary
 }
 
 export interface Component {
