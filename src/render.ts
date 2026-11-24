@@ -1,6 +1,6 @@
-import { PARTS, PinDef, pinDir, pinWorld } from './engine/parts';
+import { PARTS, PinDef, cellW, pinDir, pinWorld } from './engine/parts';
 import { Sim } from './engine/sim';
-import { Bit, Component, V1, VX, VZ, Wire } from './engine/types';
+import { Bit, Component, V0, V1, VX, VZ, Wire } from './engine/types';
 
 export const COL = { off: '#4a5268', on: '#4cc38a', z: '#9aa0b0', x: '#ff5a5a', body: '#2b303d', stroke: '#c9cedb', sel: '#5aa9ff' };
 
@@ -60,6 +60,8 @@ export function drawComponent(ctx: CanvasRenderingContext2D, c: Component, sim: 
   const s = def.size(c.props);
   const pins = def.pins(c.props);
   const val = (pi: number) => sim?.pinValue(c.id, pi) ?? [];
+  /** Bits for value displays; tray icons (no sim) show all zeros. */
+  const bitsFor = (pi: number): Bit[] => (sim ? val(pi) : (Array(pins[pi].width).fill(0) as Bit[]));
   ctx.save();
   ctx.translate(c.x, c.y);
   ctx.rotate((c.rot & 3) * Math.PI / 2);
@@ -88,20 +90,52 @@ export function drawComponent(ctx: CanvasRenderingContext2D, c: Component, sim: 
       break;
     }
     case 'IN': {
-      const bits = val(0), st = bitsState(bits);
+      const bits = bitsFor(0), st = bitsState(bits);
       rr(ctx, 2, 2, s.w - 12, s.h - 4, 8); ctx.fill(); ctx.stroke();
       if (bits.length <= 1) {
         ctx.beginPath(); ctx.arc(15, 20, 11, 0, Math.PI * 2); ctx.fillStyle = stateColor(st); ctx.fill();
-      } else label(ctx, hex(bits), (s.w - 10) / 2, 20, 13, stateColor(st));
+      } else {
+        cells(ctx, bits, 6, 6, cellW(bits.length), '#4cc38a', '#3a4256');
+        label(ctx, valueText(bits), 2 + (s.w - 12) / 2, 32, 10, COL.stroke);
+      }
       break;
     }
     case 'OUT': {
-      const bits = val(0), st = bitsState(bits);
+      const bits = bitsFor(0), st = bitsState(bits);
       if (bits.length <= 1) {
         ctx.beginPath(); ctx.arc(24, 20, 14, 0, Math.PI * 2);
-        ctx.fillStyle = st === 'on' ? '#ff5a3c' : st === 'x' ? COL.x : '#3a2a2a'; ctx.fill(); ctx.stroke();
+        ctx.fillStyle = st === 'on' ? '#ff5a3c' : st === 'x' ? COL.x : '#3a2a2a'; ctx.fill();
+        if (st === 'z') ctx.setLineDash([3, 3]);
+        ctx.stroke(); ctx.setLineDash([]);
+        if (st === 'z') label(ctx, 'Z', 24, 20, 11, COL.z);
+        if (st === 'x') label(ctx, '!', 24, 20, 14, '#fff');
         if (st === 'on') { ctx.save(); ctx.globalAlpha = .35; ctx.beginPath(); ctx.arc(24, 20, 19, 0, Math.PI * 2); ctx.fill(); ctx.restore(); }
-      } else { rr(ctx, 10, 2, s.w - 12, s.h - 4, 8); ctx.fill(); ctx.stroke(); label(ctx, hex(bits), 10 + (s.w - 12) / 2, 20, 13, stateColor(st)); }
+      } else {
+        rr(ctx, 10, 2, s.w - 12, s.h - 4, 8); ctx.fill(); ctx.stroke();
+        cells(ctx, bits, 14, 6, cellW(bits.length), '#ff5a3c', '#3a2a2a');
+        label(ctx, valueText(bits), 10 + (s.w - 12) / 2, 32, 10, COL.stroke);
+      }
+      break;
+    }
+    case 'CONST': {
+      const bits = bitsFor(0), st = bitsState(bits), v = c.props.value ?? 0;
+      rr(ctx, 2, 2, s.w - 12, s.h - 4, 8); ctx.fill(); ctx.setLineDash([5, 3]); ctx.stroke(); ctx.setLineDash([]);
+      if ((c.props.width ?? 1) <= 1) label(ctx, v ? '1' : '0', (s.w - 10) / 2, 21, 20, v ? COL.on : '#8a93aa');
+      else label(ctx, '0x' + v.toString(16).toUpperCase(), (s.w - 10) / 2, 21, 14, stateColor(st === 'z' ? 'off' : st));
+      break;
+    }
+    case 'HEX': {
+      const bits = bitsFor(0);
+      rr(ctx, 10, 2, s.w - 12, s.h - 4, 8); ctx.fillStyle = '#0d0f14'; ctx.fill(); ctx.fillStyle = COL.body; ctx.stroke();
+      label(ctx, displayText(bits, c.props.fmt ?? 'hex'), 10 + (s.w - 12) / 2, s.h / 2 + 1, 22, bits.some((b) => b === VX) ? COL.x : bits.some((b) => b === VZ) ? COL.z : '#7dffb0', 'ui-monospace, Menlo, monospace');
+      break;
+    }
+    case 'SEG7': {
+      rr(ctx, 10, 2, s.w - 12, s.h - 4, 8); ctx.fillStyle = '#0d0f14'; ctx.fill(); ctx.fillStyle = COL.body; ctx.stroke();
+      const on = (i: number) => val(i)[0] === 1;
+      const segs: Array<[number, number, number, number]> = [[40, 16, 24, 6], [66, 24, 6, 46], [66, 80, 6, 46], [40, 128, 24, 6], [32, 80, 6, 46], [32, 24, 6, 46], [40, 72, 24, 6]];
+      segs.forEach((g, i) => { ctx.fillStyle = on(i) ? '#ff5a3c' : '#2a2326'; ctx.fillRect(...g); });
+      for (let i = 0; i < 7; i++) label(ctx, 'abcdefg'[i], 20, 15 + i * 20, 10, COL.z);
       break;
     }
     case 'PORT': {
@@ -113,7 +147,6 @@ export function drawComponent(ctx: CanvasRenderingContext2D, c: Component, sim: 
     case 'SPLIT': case 'MERGE': {
       const bx = c.type === 'SPLIT' ? 12 : 22;
       ctx.fillStyle = COL.stroke; ctx.fillRect(bx, 4, 6, s.h - 8);
-      label(ctx, String(c.props.width ?? 1), bx + 3, -6, 10, COL.stroke);
       break;
     }
   }
@@ -128,16 +161,11 @@ function stubInward(p: PinDef, s: { w: number; h: number }) {
   if (p.x >= s.w) return { x: -1, y: 0 };
   return p.y <= 0 ? { x: 0, y: 1 } : { x: 0, y: -1 };
 }
-function hex(bits: Bit[]) {
-  if (bits.some((b) => b > 1)) return bits.some((b) => b === VX) ? 'X' : 'Z';
-  const v = bits.reduce<number>((a, b, i) => a + b * 2 ** i, 0);
-  return bits.length <= 4 ? v.toString(2).padStart(bits.length, '0') : '0x' + v.toString(16).toUpperCase();
-}
 function rr(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
   ctx.beginPath(); ctx.roundRect(x, y, w, h, r);
 }
-export function label(ctx: CanvasRenderingContext2D, t: string, x: number, y: number, size: number, color: string) {
-  ctx.save(); ctx.fillStyle = color; ctx.font = `600 ${size}px -apple-system, system-ui, sans-serif`;
+export function label(ctx: CanvasRenderingContext2D, t: string, x: number, y: number, size: number, color: string, family = '-apple-system, system-ui, sans-serif') {
+  ctx.save(); ctx.fillStyle = color; ctx.font = `600 ${size}px ${family}`;
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(t, x, y); ctx.restore();
 }
 
@@ -155,4 +183,39 @@ function drawGate(ctx: CanvasRenderingContext2D, shape: 'and' | 'or' | 'xor' | '
   ctx.fill(); ctx.stroke();
   if (shape === 'xor') { ctx.beginPath(); ctx.moveTo(7, t); ctx.quadraticCurveTo(19, m, 7, b); ctx.stroke(); }
   if (bubble) { ctx.beginPath(); ctx.arc(tip + 5, m, 5, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); }
+}
+
+/** Row of bit cells, most significant bit on the left. */
+function cells(ctx: CanvasRenderingContext2D, bits: Bit[], x0: number, y0: number, cw: number, onFill: string, offFill: string) {
+  const n = bits.length;
+  for (let k = 0; k < n; k++) {
+    const b = bits[n - 1 - k], x = x0 + k * cw;
+    ctx.save();
+    ctx.fillStyle = b === V1 ? onFill : b === VX ? COL.x : offFill;
+    ctx.beginPath(); ctx.roundRect(x + 1, y0, cw - 2, 18, 3); ctx.fill();
+    if (b === VZ) { ctx.setLineDash([2, 2]); ctx.strokeStyle = COL.z; ctx.lineWidth = 1; ctx.stroke(); }
+    ctx.restore();
+    label(ctx, b === V1 ? '1' : b === V0 ? '0' : b === VZ ? 'Z' : 'X', x + cw / 2, y0 + 10, cw >= 18 ? 12 : 10, b === V1 ? '#10141a' : '#c9cedb');
+  }
+}
+/** "0xA5 · 165" or Z / X when not fully known. */
+export function valueText(bits: Bit[]): string {
+  if (bits.some((b) => b === VX)) return 'X';
+  if (bits.some((b) => b === VZ)) return bits.every((b) => b === VZ) ? 'Z' : 'partly Z';
+  const v = bits.reduce<number>((a, b, i) => a + b * 2 ** i, 0);
+  return `0x${v.toString(16).toUpperCase().padStart(Math.ceil(bits.length / 4), '0')} · ${v}`;
+}
+/** Text for the numeric display: one char per hex digit (X/Z shown per digit), or decimal. */
+export function displayText(bits: Bit[], fmt: 'hex' | 'dec'): string {
+  const digits = Math.ceil(bits.length / 4);
+  if (fmt === 'dec') {
+    if (bits.some((b) => b === VX)) return 'X'; if (bits.some((b) => b === VZ)) return 'Z';
+    return String(bits.reduce<number>((a, b, i) => a + b * 2 ** i, 0));
+  }
+  let out = '';
+  for (let d = digits - 1; d >= 0; d--) {
+    const nib = bits.slice(d * 4, d * 4 + 4);
+    out += nib.some((b) => b === VX) ? 'X' : nib.some((b) => b === VZ) ? 'Z' : nib.reduce<number>((a, b, i) => a + b * 2 ** i, 0).toString(16).toUpperCase();
+  }
+  return out;
 }

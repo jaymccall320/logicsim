@@ -1,10 +1,11 @@
 import './style.css';
-import { PARTS, pinDir, pinWorld, rotatedSize, width } from './engine/parts';
+import { PARTS, cellW, groupsOf, pinDir, pinWorld, rotatedSize, width } from './engine/parts';
 import { Sim } from './engine/sim';
 import { Circuit, Component, PinRef, Wire } from './engine/types';
-import { drawComponent, drawWire, formatBits, routeBetween, wirePath, COL } from './render';
+import { drawComponent, drawWire, formatBits, label, routeBetween, wirePath, COL } from './render';
 import { load, save } from './storage';
 import { sampleCircuit } from './sample';
+import { sanitize } from './engine/validate';
 
 type Pt = { x: number; y: number };
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -27,6 +28,7 @@ let running = true;
 let ticksPerSec = 600;
 let tickAcc = 0;
 const undoStack: string[] = [];
+const redoStack: string[] = [];
 let inspect: { kind: 'wire'; id: string; sx: number; sy: number } | { kind: 'pin'; ref: PinRef; sx: number; sy: number } | null = null;
 
 const uid = () => Math.random().toString(36).slice(2, 9);
@@ -39,22 +41,30 @@ function rebuild() {
   sim = new Sim(circuit, sim);
   scheduleSave();
 }
-function pushUndo() { undoStack.push(JSON.stringify(circuit)); if (undoStack.length > 100) undoStack.shift(); }
-function undo() { if (readOnly()) return; const s = undoStack.pop(); if (s) { circuit = JSON.parse(s); rebuild(); } }
+function pushUndo() { undoStack.push(JSON.stringify(circuit)); if (undoStack.length > 100) undoStack.shift(); redoStack.length = 0; }
+function undo() { if (readOnly()) return; const s = undoStack.pop(); if (s) { redoStack.push(JSON.stringify(circuit)); circuit = JSON.parse(s); selected = null; rebuild(); } }
+function redo() { if (readOnly()) return; const s = redoStack.pop(); if (s) { undoStack.push(JSON.stringify(circuit)); circuit = JSON.parse(s); selected = null; rebuild(); } }
 
 // ---------------- persistence ----------------
 let saveTimer = 0;
 function scheduleSave() {
+  if (readOnly()) return; // the 'look inside' view must never overwrite the saved camera
   clearTimeout(saveTimer);
-  saveTimer = window.setTimeout(() => save('autosave', { circuit, cam }).catch(console.warn), 400);
+  saveTimer = window.setTimeout(() => save('autosave', { circuit, cam: { ...cam }, vw: cssW, vh: cssH }).catch(console.warn), 400);
 }
 async function init() {
   const params = new URLSearchParams(location.search);
-  let saved: { circuit: Circuit; cam: typeof cam } | undefined;
+  let saved: { circuit: Circuit; cam?: typeof cam; vw?: number; vh?: number } | undefined;
   if (!params.has('sample')) { try { saved = await load('autosave'); } catch (e) { console.warn(e); } }
-  circuit = saved?.circuit?.components ? saved.circuit : sampleCircuit();
+  const clean = saved ? sanitize(saved.circuit) : null;
+  circuit = clean ? clean.circuit : sampleCircuit();
   rebuild();
-  resize(); fit();
+  resize();
+  // Restore the saved view only when the screen is the same size (otherwise it could be off-screen); else fit.
+  const c = saved?.cam;
+  if (clean && c && Number.isFinite(c.s) && c.s > 0.1 && Math.abs((saved?.vw ?? 0) - cssW) < 2 && Math.abs((saved?.vh ?? 0) - cssH) < 2) Object.assign(cam, c);
+  else fit();
+  if (clean && (clean.droppedParts.length || clean.droppedWires)) toast(`Loaded with ${clean.droppedParts.length} unknown part(s) and ${clean.droppedWires} broken wire(s) removed.`, 'info');
   requestAnimationFrame(frame);
 }
 function exportFile() {
@@ -65,14 +75,17 @@ function exportFile() {
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
 $('file').addEventListener('change', async (e) => {
-  const f = (e.target as HTMLInputElement).files?.[0];
+  const input = e.target as HTMLInputElement, f = input.files?.[0];
   if (!f) return;
   try {
-    const c = JSON.parse(await f.text()) as Circuit;
-    if (!Array.isArray(c.components) || !Array.isArray(c.wires)) throw new Error('not a circuit file');
-    pushUndo(); circuit = { version: 1, components: c.components, wires: c.wires }; sim = new Sim({ version: 1, components: [], wires: [] }); rebuild(); fit();
-  } catch (err) { alert('Could not import: ' + err); }
-  (e.target as HTMLInputElement).value = '';
+    const clean = sanitize(JSON.parse(await f.text()));
+    if (!clean) throw new Error('this is not a LogicSim circuit file');
+    if (readOnly()) { viewStack.length = 0; updateViewUI(); }
+    pushUndo(); circuit = clean.circuit; selected = null; sim = new Sim({ version: 1, components: [], wires: [] }); rebuild(); fit();
+    const bad = clean.droppedParts.length + clean.droppedWires;
+    toast(bad ? `Imported. Removed ${clean.droppedParts.length} unknown part(s) and ${clean.droppedWires} broken wire(s).` : `Imported ${clean.circuit.components.length} parts.`, 'info');
+  } catch (err) { toast('Could not import: ' + (err as Error).message); }
+  input.value = '';
 });
 
 // ---------------- geometry / hit tests ----------------
@@ -109,41 +122,94 @@ function hitWire(w: Pt, tolPx = coarse ? 16 : 10): Wire | null {
 function pinWidth(r: PinRef) { const c = cur().map.get(r.c)!; return pinsOf(c)[r.p].width; }
 
 // ---------------- actions ----------------
-function addPart(type: string, at: Pt, props?: Component['props']) {
+const overlaps = (x: number, y: number, w: number, h: number) =>
+  circuit.components.some((o) => { const q = rotatedSize(o); return Math.abs(o.x - x) < (q.w + w) / 2 + 10 && Math.abs(o.y - y) < (q.h + h) / 2 + 10; });
+function addPart(type: string, at: Pt, props?: Component['props'], avoidOverlap = false) {
   if (readOnly()) return;
   pushUndo();
-  const c: Component = { id: uid(), type, x: snap(at.x), y: snap(at.y), rot: 0, props: { ...(type === 'IN' ? { value: 0 } : {}), ...props } };
+  const p = { ...(type === 'IN' ? { value: 0 } : {}), ...props };
+  if (p.groups) p.groups = p.groups.slice();
+  const c: Component = { id: uid(), type, x: snap(at.x), y: snap(at.y), rot: 0, props: p };
+  if (avoidOverlap) { // tap-to-place: walk outwards until the spot is free
+    const sz = rotatedSize(c);
+    search: for (let ring = 0; ring < 12; ring++) for (let k = 0; k < Math.max(1, ring * 8); k++) {
+      const ang = (k / Math.max(1, ring * 8)) * Math.PI * 2, x = snap(at.x + Math.cos(ang) * ring * 60), y = snap(at.y + Math.sin(ang) * ring * 50);
+      if (!overlaps(x, y, sz.w, sz.h)) { c.x = x; c.y = y; break search; }
+    }
+  }
   circuit.components.push(c); selected = c.id; rebuild();
 }
+const mismatchMsg = (a: number, b: number) => `Can't connect a ${a}-bit pin to a ${b}-bit pin. Use a splitter or merger to change the width.`;
 function addWire(a: PinRef, b: PinRef) {
   if (a.c === b.c && a.p === b.p) return;
   const dup = circuit.wires.some((w) => (same(w.a, a) && same(w.b, b)) || (same(w.a, b) && same(w.b, a)));
   if (dup) return;
-  if (pinWidth(a) !== pinWidth(b)) { flash(`Width mismatch: ${pinWidth(a)}-bit vs ${pinWidth(b)}-bit`); return; }
+  if (pinWidth(a) !== pinWidth(b)) { toast(mismatchMsg(pinWidth(a), pinWidth(b))); return; }
   pushUndo(); circuit.wires.push({ id: uid(), a, b }); rebuild();
 }
 const same = (x: PinRef, y: PinRef) => x.c === y.c && x.p === y.p;
-function toggleInput(c: Component) {
-  const w = width(c.props), max = 2 ** w;
-  c.props.value = w === 1 ? (c.props.value ? 0 : 1) : ((c.props.value ?? 0) + 1) % max;
+function toggleInput(c: Component) { // single-bit switch
+  c.props.value = c.props.value ? 0 : 1;
   sim.touch(c.id); scheduleSave();
+}
+function toggleBit(c: Component, bit: number) {
+  const v = c.props.value ?? 0;
+  c.props.value = (Math.floor(v / 2 ** bit) % 2 ? v - 2 ** bit : v + 2 ** bit);
+  sim.touch(c.id); scheduleSave();
+}
+/** Which bit of a multi-bit switch is under a world point (cells are drawn MSB first), or null. */
+function bitAt(c: Component, wp: Pt): number | null {
+  const s = PARTS[c.type].size(c.props), n = width(c.props);
+  let dx = wp.x - c.x, dy = wp.y - c.y;
+  for (let r = 0; r < (c.rot & 3); r++) [dx, dy] = [dy, -dx];
+  const k = Math.floor((dx + s.w / 2 - 6) / cellW(n)), ly = dy + s.h / 2;
+  return k < 0 || k >= n || ly < 4 || ly > 28 ? null : n - 1 - k;
 }
 function deleteComp(id: string) {
   pushUndo(); circuit.components = circuit.components.filter((c) => c.id !== id);
   if (selected === id) selected = null; rebuild();
 }
 function deleteWire(id: string) { pushUndo(); circuit.wires = circuit.wires.filter((w) => w.id !== id); rebuild(); }
-function setWidth(c: Component, w: number) {
-  const max = PARTS[c.type].maxWidth; w = Math.max(1, Math.min(max, w));
-  if (w === width(c.props)) return;
-  pushUndo(); c.props.width = w; if (c.type === 'IN') c.props.value = (c.props.value ?? 0) % 2 ** w;
-  // drop wires whose pins vanished or no longer match in width
+/** Drop wires whose pin no longer exists or whose width no longer matches. Returns how many went. */
+function pruneWires(): number {
+  const n = circuit.wires.length;
   circuit.wires = circuit.wires.filter((wr) => {
     const ca = circuit.components.find((x) => x.id === wr.a.c), cb = circuit.components.find((x) => x.id === wr.b.c);
     const pa = ca && pinsOf(ca)[wr.a.p], pb = cb && pinsOf(cb)[wr.b.p];
     return pa && pb && pa.width === pb.width;
   });
-  rebuild();
+  return n - circuit.wires.length;
+}
+const noteRemoved = (k: number) => { if (k) toast(`${k} wire${k === 1 ? '' : 's'} no longer matched and ${k === 1 ? 'was' : 'were'} removed.`, 'info'); };
+function setWidth(c: Component, w: number) {
+  const max = PARTS[c.type].maxWidth; w = Math.max(1, Math.min(max, w));
+  if (w === width(c.props)) return;
+  pushUndo(); c.props.width = w; if (w === 1) delete c.props.width;
+  if (c.type === 'IN' || c.type === 'CONST') c.props.value = (c.props.value ?? 0) % 2 ** w;
+  delete c.props.groups; // splitters/mergers go back to one wire per bit
+  noteRemoved(pruneWires()); rebuild();
+}
+function setGroups(c: Component, groups: number[]) {
+  pushUndo();
+  const w = groups.reduce((a, b) => a + b, 0);
+  c.props.width = w; if (groups.every((g) => g === 1)) delete c.props.groups; else c.props.groups = groups;
+  noteRemoved(pruneWires()); rebuild();
+}
+const fmtGroups = (g: number[]) => (g.length <= 4 ? g.join('+') : g.every((x) => x === g[0]) ? `${g[0]}×${g.length}` : g.join('+'));
+function groupPresets(w: number): number[][] {
+  const rep = (n: number) => Array.from({ length: w / n }, () => n);
+  const out: number[][] = [Array.from({ length: w }, () => 1)];
+  if (w >= 4 && w % 2 === 0) out.push(rep(2));
+  if (w > 4 && w % 4 === 0) out.push(rep(4));
+  if (w > 8 && w % 8 === 0) out.push(rep(8));
+  if (w >= 2 && w % 2 === 0 && w / 2 > 1) out.push([w / 2, w / 2]);
+  const seen = new Set<string>();
+  return out.filter((g) => { const k = g.join(','); if (seen.has(k) || g.length > 16) return false; seen.add(k); return true; });
+}
+function duplicate(c: Component) {
+  pushUndo();
+  const d: Component = JSON.parse(JSON.stringify(c)); d.id = uid(); d.x += 40; d.y += 40;
+  circuit.components.push(d); selected = d.id; rebuild();
 }
 function fit() {
   const r = { width: cssW, height: cssH };
@@ -157,42 +223,75 @@ function fit() {
   cam.x = (x0 + x1) / 2 - r.width / 2 / cam.s; cam.y = (y0 + y1) / 2 - r.height / 2 / cam.s;
   scheduleSave();
 }
-let flashTimer = 0;
-function flash(msg: string) {
-  const st = $('status'); st.textContent = msg; st.style.color = COL.x;
-  clearTimeout(flashTimer); flashTimer = window.setTimeout(() => (st.style.color = ''), 2500);
-  lastStatus = performance.now() + 2500;
+let toastTimer = 0;
+function toast(msg: string, kind: 'err' | 'info' = 'err') {
+  const t = $('toast'); t.textContent = msg; t.className = kind === 'info' ? 'info' : ''; t.hidden = false;
+  clearTimeout(toastTimer); toastTimer = window.setTimeout(() => (t.hidden = true), kind === 'info' ? 3000 : 4500);
 }
 
 // ---------------- context menu ----------------
 function closeMenu() { menu.hidden = true; menu.innerHTML = ''; }
+function mkBtn(text: string, fn: () => void, cls = '') {
+  const b = document.createElement('button'); b.textContent = text; if (cls) b.className = cls;
+  b.addEventListener('pointerup', (e) => { e.stopPropagation(); fn(); closeMenu(); });
+  return b;
+}
+function segRow(title: string, opts: Array<{ text: string; on: boolean; fn: () => void }>) {
+  const row = document.createElement('div'); row.className = 'row wrap';
+  const lab = document.createElement('span'); lab.textContent = title; row.append(lab);
+  for (const o of opts) row.append(mkBtn(o.text, o.fn, 'seg' + (o.on ? ' on' : '')));
+  return row;
+}
+function openFileMenu() {
+  closeMenu(); hidePopup();
+  menu.append(
+    mkBtn('⬇ Export circuit (JSON)', exportFile),
+    mkBtn('⬆ Import circuit…', () => $('file').click()),
+    mkBtn('＋ New empty circuit', () => {
+      if (!confirm('Start a new empty circuit? (Undo can bring it back.)')) return;
+      if (readOnly()) { viewStack.length = 0; updateViewUI(); }
+      pushUndo(); circuit = { version: 1, components: [], wires: [] }; rebuild(); fit();
+    }),
+    mkBtn('▶ Load sample circuit', () => { pushUndo(); circuit = sampleCircuit(); rebuild(); fit(); }),
+  );
+  menu.hidden = false;
+  const br = $('filemenu').getBoundingClientRect(), mr = menu.getBoundingClientRect();
+  menu.style.left = Math.max(8, Math.min(br.right - mr.width, innerWidth - mr.width - 8)) + 'px'; menu.style.top = br.bottom + 6 + 'px';
+}
+function widthOptions(type: string) { return type === 'HEX' ? [4, 8, 16, 32] : type === 'SPLIT' || type === 'MERGE' ? [2, 4, 8, 16, 32] : [1, 2, 4, 8, 16, 32]; }
 function openMenu(sx: number, sy: number, target: { comp?: Component; wire?: Wire }) {
   closeMenu(); hidePopup();
-  const btn = (text: string, fn: () => void, cls = '') => {
-    const b = document.createElement('button'); b.textContent = text; if (cls) b.className = cls;
-    b.addEventListener('pointerup', (e) => { e.stopPropagation(); fn(); closeMenu(); });
-    return b;
-  };
+  const btn = mkBtn;
   if (target.comp) {
-    const c = target.comp, def = PARTS[c.type];
+    const c = target.comp, def = PARTS[c.type], w = width(c.props);
     const h = document.createElement('div'); h.className = 'row'; h.innerHTML = `<span>${def.label}${c.props.label ? ' · ' + c.props.label : ''}</span>`; menu.append(h);
     if (def.chip) menu.append(btn('🔍 Look inside', () => openChip(c)));
     if (readOnly()) { menu.hidden = false; placeMenu(sx, sy); return; }
     menu.append(btn('⟳ Rotate', () => { pushUndo(); c.rot = (c.rot + 1) & 3; rebuild(); }));
-    if (def.hasWidth) {
-      const row = document.createElement('div'); row.className = 'row';
-      const lab = document.createElement('span'); lab.textContent = `Width ${width(c.props)}`;
-      const minus = btn('−', () => setWidth(c, width(c.props) === 8 ? 4 : width(c.props) === 16 ? 8 : width(c.props) - 1));
-      const plus = btn('+', () => setWidth(c, width(c.props) >= 8 ? width(c.props) * 2 : width(c.props) === 4 ? 8 : width(c.props) + 1));
-      row.append(lab, minus, plus); menu.append(row);
+    if (def.hasWidth) menu.append(segRow(`Width: ${w} bit${w === 1 ? '' : 's'}`, widthOptions(c.type).map((n) => ({ text: String(n), on: n === w, fn: () => setWidth(c, n) }))));
+    if (c.type === 'SPLIT' || c.type === 'MERGE') {
+      const cur = groupsOf(c.props);
+      menu.append(segRow(c.type === 'SPLIT' ? 'Split into:' : 'Join from:', [
+        ...groupPresets(w).map((g) => ({ text: fmtGroups(g), on: g.join(',') === cur.join(','), fn: () => setGroups(c, g) })),
+        { text: 'Custom…', on: false, fn: () => {
+          const t = prompt('Group sizes, lowest bits first, separated by commas.\nExamples: 4,4   1,7   8,8   2,2,4', cur.join(','));
+          if (t === null) return;
+          const g = t.split(/[,+\s]+/).filter(Boolean).map(Number);
+          if (!g.length || g.some((n) => !Number.isInteger(n) || n < 1) || g.reduce((a, b) => a + b, 0) > 32) { toast('Enter whole numbers that add up to 32 or less, like 4,4.'); return; }
+          setGroups(c, g);
+        } },
+      ]));
     }
-    if (c.type === 'IN' || c.type === 'OUT') menu.append(btn('✎ Label', () => {
+    if (c.type === 'HEX') menu.append(btn(`Show as: ${(c.props.fmt ?? 'hex') === 'hex' ? 'Hex → switch to Decimal' : 'Decimal → switch to Hex'}`, () => { pushUndo(); c.props.fmt = (c.props.fmt ?? 'hex') === 'hex' ? 'dec' : 'hex'; rebuild(); }));
+    if (['IN', 'OUT', 'CONST', 'HEX', 'SEG7'].includes(c.type)) menu.append(btn('✎ Label', () => {
       const t = prompt('Label', c.props.label ?? ''); if (t !== null) { pushUndo(); c.props.label = t || undefined; rebuild(); }
     }));
-    if (c.type === 'IN' && width(c.props) > 1) menu.append(btn('# Set value', () => {
-      const t = prompt('Value (decimal or 0x / 0b)', String(c.props.value ?? 0));
-      if (t !== null) { const v = Number(t); if (Number.isFinite(v)) { c.props.value = (v >>> 0) % 2 ** width(c.props); sim.touch(c.id); scheduleSave(); } }
+    if ((c.type === 'IN' || c.type === 'CONST') && w > 1) menu.append(btn('# Set value', () => {
+      const t = prompt('Value (decimal, 0x… hex or 0b… binary)', String(c.props.value ?? 0));
+      if (t !== null) { const v = Number(t.trim()); if (Number.isFinite(v) && v >= 0) { pushUndo(); c.props.value = Math.floor(v) % 2 ** w; sim.touch(c.id); rebuild(); } else toast('That is not a valid number.'); }
     }));
+    if (c.type === 'CONST' && w === 1) menu.append(btn(`Set to ${c.props.value ? '0 (low)' : '1 (high)'}`, () => { pushUndo(); c.props.value = c.props.value ? 0 : 1; sim.touch(c.id); rebuild(); }));
+    menu.append(btn('⧉ Duplicate', () => duplicate(c)));
     menu.append(btn('🗑 Delete', () => deleteComp(c.id), 'danger'));
   } else if (target.wire) {
     if (readOnly()) return;
@@ -233,7 +332,11 @@ canvas.addEventListener('pointerdown', (e) => {
   const pin = hitPin(downW);
   const comp = hitComp(downW);
   // inputs: tapping the body toggles, so prefer body unless finger is clearly on the pin
-  if (pin && !(comp && comp.id !== pin.c && false)) {
+  let pinWins = !!pin;
+  if (pin && comp && comp.id === pin.c && comp.type === 'IN' && width(comp.props) > 1) { // bit cells beat the output pin
+    const q = pinWorld(comp, pinsOf(comp)[pin.p]); pinWins = Math.hypot(q.x - downW.x, q.y - downW.y) < 14 / cam.s;
+  }
+  if (pin && pinWins) {
     mode = 'wire'; wireFrom = pin; wireTo = downW; wireHover = null; return;
   }
   if (comp) {
@@ -282,13 +385,16 @@ function endPointer(e: PointerEvent) {
       if (wireHover && !readOnly()) addWire(wireFrom!, wireHover);
       else if (!moved) { // tap on a pin: input body toggle if it's an input part, else inspect pin
         const c = cur().map.get(wireFrom!.c)!;
-        if (c.type === 'IN' && !readOnly()) toggleInput(c);
+        if (c.type === 'IN' && width(c.props) === 1 && !readOnly()) toggleInput(c);
         else { inspect = { kind: 'pin', ref: wireFrom!, sx: e.clientX, sy: e.clientY }; popup.hidden = false; }
       }
       wireFrom = null; wireTo = null; wireHover = null; break;
     case 'press-comp':
       selected = target!.id; hidePopup();
-      if (target!.type === 'IN' && !readOnly()) toggleInput(target!);
+      if (target!.type === 'IN' && !readOnly()) {
+        if (width(target!.props) === 1) toggleInput(target!);
+        else { const bit = bitAt(target!, downW); if (bit !== null) toggleBit(target!, bit); }
+      }
       break;
     case 'drag': rebuild(); break;
     case 'press-wire':
@@ -345,30 +451,45 @@ window.addEventListener('keydown', (e) => {
   if ((e.key === 'Delete' || e.key === 'Backspace') && selected) deleteComp(selected);
   else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedWire) { deleteWire(selectedWire); hidePopup(); }
   else if (e.key === 'r' && selected) { const c = comps.get(selected); if (c) { pushUndo(); c.rot = (c.rot + 1) & 3; rebuild(); } }
-  else if ((e.metaKey || e.ctrlKey) && e.key === 'z') { e.preventDefault(); undo(); }
+  else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); }
+  else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); }
   else if (e.key === ' ') { e.preventDefault(); togglePlay(); }
 });
 
 // ---------------- parts tray (folders) ----------------
-interface TrayItem { type: string; label?: string; props?: Component['props'] }
+interface TrayItem { type: string; label?: string; sub?: string; props?: Component['props']; demo?: Component['props'] }
 interface Folder { id: string; name: string; items: () => TrayItem[]; empty?: string }
+const split = (groups: number[], sub: string): TrayItem => { const w = groups.reduce((a, b) => a + b, 0); return { type: 'SPLIT', label: 'Splitter', sub, props: { width: w, ...(groups.every((g) => g === 1) ? {} : { groups }) }, demo: groups.every((g) => g === 1) ? { width: 4 } : { width: w, groups } }; };
+const merge = (groups: number[], sub: string): TrayItem => { const w = groups.reduce((a, b) => a + b, 0); return { type: 'MERGE', label: 'Merger', sub, props: { width: w, ...(groups.every((g) => g === 1) ? {} : { groups }) }, demo: groups.every((g) => g === 1) ? { width: 4 } : { width: w, groups } }; };
 const FOLDERS: Folder[] = [
   { id: 'gates', name: 'Gates', items: () => ['NAND', 'NOT', 'AND', 'OR', 'NOR', 'XOR', 'XNOR', 'BUF'].map((type) => ({ type })) },
-  { id: 'conn', name: 'Connectors', items: () => [{ type: 'SPLIT', props: { width: 4 } }, { type: 'MERGE', props: { width: 4 } }, { type: 'TRI', label: 'Tri-state' }] },
-  { id: 'in', name: 'Inputs', items: () => [{ type: 'IN', label: 'Switch', props: { value: 0 } }, { type: 'IN', label: '4-bit In', props: { width: 4, value: 0 } }, { type: 'IN', label: '8-bit In', props: { width: 8, value: 0 } }] },
-  { id: 'out', name: 'Outputs', items: () => [{ type: 'OUT', label: 'LED' }, { type: 'OUT', label: '4-bit Out', props: { width: 4 } }, { type: 'OUT', label: '8-bit Out', props: { width: 8 } }] },
+  { id: 'conn', name: 'Connectors', items: () => [
+    split([1, 1, 1, 1, 1, 1, 1, 1], '8 → 8×1'), split([4, 4], '8 → 4+4'), split([8, 8], '16 → 8+8'),
+    merge([1, 1, 1, 1, 1, 1, 1, 1], '8×1 → 8'), merge([4, 4], '4+4 → 8'), merge([8, 8], '8+8 → 16'),
+    { type: 'TRI', label: 'Tri-state' }] },
+  { id: 'in', name: 'Inputs', items: () => [
+    { type: 'IN', label: 'Switch', sub: '1-bit', props: { value: 0 } }, { type: 'IN', label: 'Switch', sub: '4-bit', props: { width: 4, value: 0 } },
+    { type: 'IN', label: 'Switch', sub: '8-bit', props: { width: 8, value: 0 } }, { type: 'IN', label: 'Switch', sub: '16-bit', props: { width: 16, value: 0 } },
+    { type: 'CONST', label: 'High (1)', props: { value: 1 } }, { type: 'CONST', label: 'Low (0)', props: { value: 0 } },
+    { type: 'CONST', label: 'Constant', sub: '8-bit', props: { width: 8, value: 0 } }] },
+  { id: 'out', name: 'Outputs', items: () => [
+    { type: 'OUT', label: 'LED', sub: '1-bit' }, { type: 'OUT', label: 'LEDs', sub: '4-bit', props: { width: 4 } }, { type: 'OUT', label: 'LEDs', sub: '8-bit', props: { width: 8 } },
+    { type: 'OUT', label: 'LEDs', sub: '16-bit', props: { width: 16 } }, { type: 'HEX', label: 'Hex digit', sub: '4-bit', props: { width: 4 } },
+    { type: 'HEX', label: 'Hex byte', sub: '8-bit', props: { width: 8 } }, { type: 'SEG7', label: '7-segment' }] },
   { id: 'custom', name: 'Custom Chips', items: () => Object.values(PARTS).filter((d) => d.chip && !d.chip.builtin).map((d) => ({ type: d.type })),
     empty: 'No custom chips yet. Soon you will select part of a circuit and save it as a chip, and it will appear here.' },
 ];
 const tabsEl = $('tabs'), partsEl = $('parts');
-let folder = localStorage.getItem('logicsim.folder') ?? 'gates';
+const lsGet = (k: string) => { try { return localStorage.getItem(k); } catch { return null; } };
+const lsSet = (k: string, v: string) => { try { localStorage.setItem(k, v); } catch { /* storage blocked */ } };
+let folder = lsGet('logicsim.folder') ?? 'gates';
 if (!FOLDERS.some((f) => f.id === folder)) folder = 'gates';
 function renderTabs() {
   tabsEl.innerHTML = '';
   for (const f of FOLDERS) {
     const b = document.createElement('button'); b.className = 'tab' + (f.id === folder ? ' active' : ''); b.textContent = f.name;
     b.dataset.folder = f.id;
-    b.addEventListener('click', () => { folder = f.id; localStorage.setItem('logicsim.folder', folder); renderTabs(); renderParts(); });
+    b.addEventListener('click', () => { folder = f.id; lsSet('logicsim.folder', folder); renderTabs(); renderParts(); });
     tabsEl.append(b);
   }
 }
@@ -384,12 +505,14 @@ function makeTile(item: TrayItem) {
   const icon = document.createElement('canvas'); const dpr = devicePixelRatio || 1;
   icon.width = 84 * dpr; icon.height = 44 * dpr; icon.style.width = '84px'; icon.style.height = '44px';
   const ic = icon.getContext('2d')!; ic.scale(dpr, dpr);
-  const demoProps = type === 'SPLIT' || type === 'MERGE' ? { width: 2 } : { ...item.props };
+  const demoProps = { ...(item.demo ?? item.props) };
+  if (['IN', 'OUT', 'CONST'].includes(type) && (demoProps.width ?? 1) > 4) demoProps.width = 4; // icon only: keep it readable
   const demo: Component = { id: 'icon', type, x: 0, y: 0, rot: 0, props: demoProps };
   const s = def.size(demo.props), k = Math.min(76 / s.w, 40 / s.h);
   ic.translate(42, 22); ic.scale(k, k); drawComponent(ic, demo, null, false);
   const name = document.createElement('span'); name.textContent = item.label ?? def.label;
   el.append(icon, name);
+  if (item.sub) { const sub = document.createElement('span'); sub.className = 'sub'; sub.textContent = item.sub; el.append(sub); }
   let ghost: HTMLElement | null = null, start: Pt | null = null;
   el.addEventListener('pointerdown', (e) => {
     e.preventDefault(); el.setPointerCapture(e.pointerId); start = { x: e.clientX, y: e.clientY };
@@ -408,7 +531,7 @@ function makeTile(item: TrayItem) {
     if (ghost) {
       ghost.remove(); ghost = null;
       if (e.type === 'pointerup' && e.clientY < r.bottom && e.clientY > r.top) addPart(type, toWorld(e.clientX - r.left, e.clientY - r.top), item.props);
-    } else if (e.type === 'pointerup') addPart(type, toWorld(r.width / 2 + (Math.random() - .5) * 60, r.height / 2 + (Math.random() - .5) * 60), item.props);
+    } else if (e.type === 'pointerup') addPart(type, toWorld(r.width / 2, r.height / 2), item.props, true);
     start = null;
   };
   el.addEventListener('pointerup', finish); el.addEventListener('pointercancel', finish);
@@ -433,7 +556,7 @@ function openChip(c: Component) {
 function closeChip() {
   const v = viewStack.pop(); if (!v) return;
   if (v.savedCam) Object.assign(cam, v.savedCam);
-  hidePopup(); updateViewUI();
+  hidePopup(); updateViewUI(); scheduleSave();
 }
 function updateViewUI() {
   const bar = $('viewbar'), ro = readOnly();
@@ -451,13 +574,9 @@ $('play').addEventListener('click', togglePlay);
 $('step').addEventListener('click', () => { if (running) togglePlay(); sim.tick(); });
 $<HTMLSelectElement>('speed').addEventListener('change', (e) => (ticksPerSec = Number((e.target as HTMLSelectElement).value)));
 $('undo').addEventListener('click', undo);
+$('redo').addEventListener('click', redo);
 $('fit').addEventListener('click', fit);
-$('export').addEventListener('click', exportFile);
-$('import').addEventListener('click', () => $('file').click());
-$('clear').addEventListener('click', () => {
-  if (!confirm('Start a new empty circuit? (Undo can bring it back.)')) return;
-  pushUndo(); circuit = { version: 1, components: [], wires: [] }; rebuild();
-});
+$('filemenu').addEventListener('click', openFileMenu);
 
 // ---------------- render loop ----------------
 /** Size the backing store from the stage's CSS box (never from the canvas itself, which has an intrinsic size). */
@@ -510,18 +629,32 @@ function draw() {
   const r = 1.2 / cam.s;
   for (let x = Math.floor(cam.x / step) * step; x < cam.x + W; x += step)
     for (let y = Math.floor(cam.y / step) * step; y < cam.y + H; y += step) ctx.fillRect(x - r, y - r, r * 2, r * 2);
-  // wires
   const V = cur();
+  if (!V.components.length && !readOnly()) {
+    ctx.save(); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    label(ctx, 'Empty circuit', cssW / 2, cssH / 2 - 14, 22, '#8a93aa'); label(ctx, 'Pick a folder below, then drag or tap a part to add it.', cssW / 2, cssH / 2 + 14, 15, '#6c7488');
+    ctx.restore();
+  }
+  // wires
   for (const w of V.wires) {
     const pts = wirePath(sim, V.map, w); if (!pts) continue;
     drawWire(ctx, pts, sim.pinValue(w.a.c, w.a.p), pinWidth(w.a), w.id === selectedWire, sim.badWires.has(w.id));
   }
   for (const c of V.components) drawComponent(ctx, c, sim, c.id === selected);
-  // pins
+  // pins: dots, hollow orange ring on unconnected inputs, bus-width / bit-range labels
+  const wired = new Set<string>();
+  for (const w of V.wires) { wired.add(w.a.c + ':' + w.a.p); wired.add(w.b.c + ':' + w.b.p); }
   for (const c of V.components) pinsOf(c).forEach((p, pi) => {
-    const q = pinWorld(c, p);
-    ctx.beginPath(); ctx.arc(q.x, q.y, (p.width > 1 ? 4.5 : 3.5) * (coarse ? 1.25 : 1), 0, Math.PI * 2);
-    ctx.fillStyle = '#c9cedb'; ctx.fill();
+    const q = pinWorld(c, p), r = (p.width > 1 ? 4.5 : 3.5) * (coarse ? 1.25 : 1);
+    const open = p.dir === 'in' && c.type !== 'PORT' && !wired.has(c.id + ':' + pi);
+    ctx.beginPath(); ctx.arc(q.x, q.y, open ? r + 0.5 : r, 0, Math.PI * 2);
+    if (open) { ctx.fillStyle = '#14161c'; ctx.fill(); ctx.strokeStyle = '#ffb020'; ctx.lineWidth = 2; ctx.stroke(); }
+    else { ctx.fillStyle = '#c9cedb'; ctx.fill(); }
+    const isBus = c.type === 'SPLIT' || c.type === 'MERGE', showName = isBus && p.name !== 'BUS';
+    if (cam.s > 0.45 && (p.width > 1 || showName) && c.type !== 'PORT') {
+      const d = pinDir(c, p), txt = showName ? p.name : String(p.width);
+      label(ctx, txt, d.x !== 0 ? q.x + d.x * 15 : q.x + 12, d.x !== 0 ? q.y - 9 : q.y + d.y * 12, 10, showName ? COL.z : '#9fb4d8');
+    }
   });
   // wire being drawn
   if (mode === 'wire' && wireFrom && wireTo) {
@@ -532,7 +665,7 @@ function draw() {
     ctx.save(); ctx.globalAlpha = 0.8;
     drawWire(ctx, pts, sim.pinValue(wireFrom.c, wireFrom.p), p.width, true, !!wireHover && pinWidth(wireHover) !== p.width);
     ctx.restore();
-    if (wireHover) { ctx.beginPath(); ctx.arc(end.x, end.y, 9, 0, Math.PI * 2); ctx.strokeStyle = COL.sel; ctx.lineWidth = 2; ctx.stroke(); }
+    if (wireHover) { ctx.beginPath(); ctx.arc(end.x, end.y, 9, 0, Math.PI * 2); ctx.strokeStyle = pinWidth(wireHover) === p.width ? COL.sel : COL.x; ctx.lineWidth = 2; ctx.stroke(); }
   }
   // live value popup
   if (inspect) {
@@ -543,7 +676,7 @@ function draw() {
       bits = sim.pinValue(w.a.c, w.a.p); title = `${bits.length}-bit wire`;
     } else {
       const c = V.map.get(inspect.ref.c); if (!c) { hidePopup(); return; }
-      bits = sim.pinValue(c.id, inspect.ref.p); title = `${PARTS[c.type].label}.${pinsOf(c)[inspect.ref.p].name}`;
+      bits = sim.pinValue(c.id, inspect.ref.p); title = `${PARTS[c.type].label}.${pinsOf(c)[inspect.ref.p].name}${pinsOf(c)[inspect.ref.p].dir === 'in' && !wired.has(c.id + ':' + inspect.ref.p) ? ' (not connected)' : ''}`;
     }
     const conflict = bits.some((b) => b === 3);
     popup.textContent = `${title}\n${formatBits(bits)}${conflict ? '\n⚠ conflict / unknown' : bits.every((b) => b === 2) ? '\n(floating)' : ''}`;
@@ -552,5 +685,5 @@ function draw() {
 }
 
 // debugging / automation hook
-(window as unknown as { logicsim: unknown }).logicsim = { get circuit() { return circuit; }, get sim() { return sim; }, cam, fit, rebuild, openChip, closeChip };
+(window as unknown as { logicsim: unknown }).logicsim = { get circuit() { return circuit; }, get sim() { return sim; }, cam, fit, rebuild, openChip, closeChip, pinPos: (id: string, p: number) => { const c = cur().map.get(id)!; const q = pinWorld(c, pinsOf(c)[p]); const r = canvas.getBoundingClientRect(); return { x: r.left + (q.x - cam.x) * cam.s, y: r.top + (q.y - cam.y) * cam.s }; }, compPos: (id: string) => { const c = cur().map.get(id)!; const r = canvas.getBoundingClientRect(); return { x: r.left + (c.x - cam.x) * cam.s, y: r.top + (c.y - cam.y) * cam.s }; } };
 init();

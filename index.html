@@ -17,26 +17,24 @@
 <div id="app">
   <header id="topbar">
     <span class="title">LogicSim</span>
-    <button id="undo" title="Undo">↶</button>
-    <span class="sep"></span>
+    <button id="undo" title="Undo" aria-label="Undo">↶</button>
+    <button id="redo" title="Redo" aria-label="Redo">↷</button>
     <button id="play" title="Pause / run">Pause</button>
     <button id="step" title="Step one tick">Step</button>
-    <select id="speed" title="Simulation speed">
-      <option value="5">5 ticks/s</option>
-      <option value="60">60 ticks/s</option>
-      <option value="600" selected>600 ticks/s</option>
-      <option value="6000">6k ticks/s</option>
+    <select id="speed" title="Simulation speed (ticks per second)" aria-label="Simulation speed">
+      <option value="5">5/s</option>
+      <option value="60">60/s</option>
+      <option value="600" selected>600/s</option>
+      <option value="6000">6k/s</option>
       <option value="100000">Max</option>
     </select>
     <span id="status"></span>
     <span class="grow"></span>
     <button id="fit" title="Fit circuit to screen">⤢ Fit</button>
-    <button id="export">Export</button>
-    <button id="import">Import</button>
-    <button id="clear">New</button>
+    <button id="filemenu" title="Export, import, new">File ▾</button>
     <input id="file" type="file" accept=".json,application/json" hidden />
   </header>
-  <div id="stage"><canvas id="canvas"></canvas><div id="viewbar" hidden><button id="viewback">← Back</button><span id="viewtitle"></span></div></div>
+  <div id="stage"><canvas id="canvas"></canvas><div id="viewbar" hidden><button id="viewback">← Back</button><span id="viewtitle"></span></div><div id="toast" hidden></div></div>
   <div id="popup" hidden></div>
   <div id="menu" hidden></div>
   <nav id="tray"><div id="tabs"></div><div id="parts"></div></nav>

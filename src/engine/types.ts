@@ -8,6 +8,8 @@ export interface Props {
   label?: string;
   delay?: number;   // propagation delay in ticks (default per part)
   dir?: 'in' | 'out'; // PORT parts inside a chip: which side of the chip boundary
+  groups?: number[]; // splitter / merger: bit-group sizes, lowest bits first (sum = width)
+  fmt?: 'hex' | 'dec'; // HEX display number format
 }
 
 export interface Component {
