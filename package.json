@@ -1,0 +1,20 @@
+{
+  "name": "logicsim",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "localtunnel": "^2.0.2",
+    "puppeteer-core": "^25.18.1",
+    "tunnelmole": "^2.4.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.1"
+  }
+}

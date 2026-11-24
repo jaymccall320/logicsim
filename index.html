@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="LogicSim" />
+<meta name="theme-color" content="#14161c" />
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="apple-touch-icon" href="icon-180.png" />
+<link rel="icon" href="icon-192.png" />
+<title>LogicSim</title>
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <span class="title">LogicSim</span>
+    <button id="undo" title="Undo">↶</button>
+    <span class="sep"></span>
+    <button id="play" title="Pause / run">⏸</button>
+    <button id="step" title="Step one tick">⏭</button>
+    <select id="speed" title="Simulation speed">
+      <option value="5">5 ticks/s</option>
+      <option value="60">60 ticks/s</option>
+      <option value="600" selected>600 ticks/s</option>
+      <option value="6000">6k ticks/s</option>
+      <option value="100000">Max</option>
+    </select>
+    <span id="status"></span>
+    <span class="grow"></span>
+    <button id="fit" title="Fit circuit to screen">⤢</button>
+    <button id="export">Export</button>
+    <button id="import">Import</button>
+    <button id="clear">New</button>
+    <input id="file" type="file" accept=".json,application/json" hidden />
+  </header>
+  <canvas id="canvas"></canvas>
+  <div id="popup" hidden></div>
+  <div id="menu" hidden></div>
+  <nav id="tray"></nav>
+</div>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>
